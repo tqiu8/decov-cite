@@ -48,7 +48,7 @@ parser.add_argument('--num_embeddings', type=int, default=4,
                     help='number of embeddings to train (default: 4)')
 parser.add_argument('--spatial', dest='spatial', action='store_true', default=False,
                     help='Flag indicating whether to use spatial features')
-parser.add_argument('--decov', '-d', nargs='+',
+parser.add_argument('--decov', '-d', nargs='+', default=[],
 		    help='position(s) to incorproate decov loss')
 
 def main():
@@ -146,6 +146,7 @@ def process_epoch(model, train_loader, sess, train_step, epoch, suffix):
     loss = model[0]
     region_loss = model[1]
     l1_loss = model[2]
+    d_loss = model[3]
     
     n_iterations = train_loader.num_batches()
     for batch_id in range(n_iterations):

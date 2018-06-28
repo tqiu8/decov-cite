@@ -1,3 +1,4 @@
+from __future__ import division
 import tensorflow as tf
 
 from tensorflow.contrib.layers.python.layers import batch_norm
@@ -37,7 +38,7 @@ def concept_layer(x, outdim, train_phase_plh, concept_id, weights):
 
 def batch_norm_layer(x, train_phase, scope_bn):
     """Returns the output of a batch norm layer."""
-    bn = tf.contrib.layers.batch_norm(x, decay=0.99, center=True, scale=True,
+    bn = tf.contrib.layers.batch_norm(x, decay=0.99, center=True, scale=True, 
                                       is_training=train_phase,
                                       reuse=None,
                                       trainable=True,
@@ -45,7 +46,24 @@ def batch_norm_layer(x, train_phase, scope_bn):
                                       scope=scope_bn)
     return bn
 
-def embedding_branch(x, embed_dim, train_phase_plh, scope_in, do_l2norm = True, outdim = None, norm_axis = 1):
+def decov(x):
+    batch_size = x.shape[0].value
+
+    #Compute the sample means of activations over the batch
+    b_mean = tf.nn.moments(x, [0])[0]
+    #Calculate covariances between all paris of activations in the layer
+    corr = tf.reduce_sum(tf.matmul((x-b_mean), (x-b_mean), transpose_a=True), 0)/batch_size
+    print(corr.shape)
+
+    #Diagonal of the covariance matrix
+    corr_diag = tf.diag(tf.diag_part(corr))
+
+    decov_loss = 0.5 * (tf.pow(tf.norm(corr, axis=[-2,-1]), 2) - tf.pow(tf.norm(corr_diag), 2))
+    print('decov loss', decov_loss)
+    return decov_loss
+
+def embedding_branch(x, embed_dim, train_phase_plh, scope_in, do_l2norm = True, outdim = None, norm_axis = 1, 
+    decov_loc=[], decov_losses=[]):
     """Applies a pair of fully connected layers to the input tensor.
 
     Arguments:
@@ -56,6 +74,7 @@ def embedding_branch(x, embed_dim, train_phase_plh, scope_in, do_l2norm = True, 
     do_l2norm -- indicates if the output should be l2 normalized
     outdim -- dimension of the output embedding, if None outdim=embed_dim
     """
+
     embed_fc1 = add_fc(x, embed_dim, train_phase_plh, scope_in + '_embed_1')
     if outdim is None:
         outdim = embed_dim
@@ -64,10 +83,15 @@ def embedding_branch(x, embed_dim, train_phase_plh, scope_in, do_l2norm = True, 
     embed_fc2 = fully_connected(embed_fc1, outdim, activation_fn = None,
                                 weights_regularizer = l2_reg,
                                 scope = scope_in + '_embed_2')
+  
     if do_l2norm:
+        if 'pre_l2' in decov_loc:
+            decov_losses.append(decov(embed_fc2))
         embed_fc2 = tf.nn.l2_normalize(embed_fc2, norm_axis)
+        if 'post_l2' in decov_loc:        
+            decov_losses.append(decov(embed_fc2))
 
-    return embed_fc2
+    return decov_losses, embed_fc2
 
 def setup_model(args, phrase_plh, region_plh, train_phase_plh, labels_plh, num_boxes_plh, num_phrases_plh, region_feature_dim, phrase_feature_dim, phrase_denom_plh):
     """Describes the computational graph and returns the losses and outputs.
@@ -94,10 +118,16 @@ def setup_model(args, phrase_plh, region_plh, train_phase_plh, labels_plh, num_b
     final_embed = args.dim_embed
     embed_dim = final_embed * 4
 
-    phrase_embed = embedding_branch(phrase_plh, embed_dim, train_phase_plh, 'phrase', norm_axis = 2)
-    region_embed = embedding_branch(region_plh, embed_dim, train_phase_plh, 'region', norm_axis = 2)
-    concept_weights = embedding_branch(phrase_plh, embed_dim, train_phase_plh, 'concept_weight',
+    decov_locations = args.decov
+    decov_losses = []
+
+    decov_losses, phrase_embed = embedding_branch(phrase_plh, embed_dim, train_phase_plh, 
+                                'phrase', norm_axis = 2, decov_loc=decov_locations, decov_losses=decov_losses)
+    decov_losses, region_embed = embedding_branch(region_plh, embed_dim, train_phase_plh, 
+                                'region', norm_axis = 2, decov_loc=decov_locations, decov_losses=decov_losses)
+    __, concept_weights = embedding_branch(phrase_plh, embed_dim, train_phase_plh, 'concept_weight',
                                        do_l2norm = False, outdim = args.num_embeddings)
+
     concept_loss = tf.reduce_sum(tf.norm(concept_weights, axis=2, ord=1)) / phrase_denom_plh
     concept_weights = tf.nn.softmax(concept_weights)
     
@@ -117,5 +147,13 @@ def setup_model(args, phrase_plh, region_plh, train_phase_plh, labels_plh, num_b
     ind_labels = tf.abs(labels_plh)
     num_samples = tf.reduce_sum(ind_labels) + 0.00001
     region_loss = tf.reduce_sum(tf.log(1+tf.exp(-joint_embed_3*labels_plh))*ind_labels)/num_samples
-    total_loss = region_loss + concept_loss * args.embed_l1
-    return total_loss, region_loss, concept_loss, region_prob
+
+    for loc in args.decov:
+        if loc == 'joint_embed_1':
+            decov_losses.append(decov(joint_embed_1))
+        if loc == 'joint_embed_2':
+            decov_losses.append(decov(joint_embed_2))
+    decov_loss = sum(decov_losses)
+	
+    total_loss = region_loss + (concept_loss * args.embed_l1) + decov_loss
+    return total_loss, region_loss, concept_loss, region_prob, decov_loss
