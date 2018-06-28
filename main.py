@@ -48,6 +48,8 @@ parser.add_argument('--num_embeddings', type=int, default=4,
                     help='number of embeddings to train (default: 4)')
 parser.add_argument('--spatial', dest='spatial', action='store_true', default=False,
                     help='Flag indicating whether to use spatial features')
+parser.add_argument('--decov', '-d', nargs='+',
+		    help='position(s) to incorproate decov loss')
 
 def main():
     global args
